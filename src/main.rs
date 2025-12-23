@@ -103,7 +103,7 @@ fn main() {
 
             match frame.frame_type {
                 FrameType::IPv4 => {
-                    let ip_packet = parse_IPv4(frame.payload);
+                    let ip_packet = parse_ipv4(frame.payload);
                     println!("Internet Protocol Version 4");
                     println!("\tVersion: {}", ip_packet.version);
                     println!("\tHeader length: {}", ip_packet.header_length);
@@ -119,10 +119,35 @@ fn main() {
                     println!("\tHeader checkshum: 0x{:04x}", ip_packet.header_checksum);
                     println!("\tSoruce: {}", ip_packet.source_address);
                     println!("\tDestination: {}", ip_packet.destination_address);
-                    println!();
+
+                    if let Some(payload) = ip_packet.payload {
+                        match ip_packet.protocol {
+                            InternetProtocol::TCP => {
+                                let tcp_packet = parse_tcp(payload);
+                                println!("Transmission Control Protocol");
+                                println!("\tSource port: {}", tcp_packet.source_port);
+                                println!("\tDestination port: {}", tcp_packet.destination_port);
+                                println!("\tSequence number: {}", tcp_packet.sequence_number);
+                                println!("\tAcknowledgment number: {}", tcp_packet.ack_number);
+                                println!("\tHeader length: {}", tcp_packet.data_offset * 4);
+                                println!("\tFlags:");
+                                println!("\t\tUrgent: {}", tcp_packet.URG);
+                                println!("\t\tAcknowledgment: {}", tcp_packet.ACK);
+                                println!("\t\tPush: {}", tcp_packet.PSH);
+                                println!("\t\tReset: {}", tcp_packet.RST);
+                                println!("\t\tSyn: {}", tcp_packet.SYN);
+                                println!("\t\tFin: {}", tcp_packet.FIN);
+                                println!("\tWindow size value: {}", tcp_packet.window);
+                                println!("\tChecksum: 0x{:04x}", tcp_packet.checksum);
+                            }
+                            _ => println!("Not implemented yet"),
+                        }
+                    }
                 }
                 _ => println!("Unknown payload"),
             }
+
+            println!();
 
             let allign = mem::size_of::<usize>() - 1;
             offset += (hdr.bh_hdrlen as usize + hdr.bh_caplen as usize + allign) & !allign;
@@ -198,7 +223,7 @@ fn parse_frame<'a>(bytes: &'a [u8]) -> EthernetFrame<'a> {
 }
 
 #[derive(Debug)]
-struct IPv4Packet {
+struct IPv4Packet<'a> {
     version: u8,
     header_length: u8,
     type_of_service: u8,
@@ -212,9 +237,10 @@ struct IPv4Packet {
     header_checksum: u16,
     source_address: IPv4Addr,
     destination_address: IPv4Addr,
+    payload: Option<&'a [u8]>,
 }
 
-impl IPv4Packet {
+impl IPv4Packet<'_> {
     fn new() -> Self {
         Self {
             version: 0,
@@ -230,6 +256,7 @@ impl IPv4Packet {
             header_checksum: 0,
             source_address: IPv4Addr::empty(),
             destination_address: IPv4Addr::empty(),
+            payload: None,
         }
     }
 }
@@ -289,7 +316,7 @@ impl TryFrom<u8> for InternetProtocol {
     }
 }
 
-fn parse_IPv4<'a>(bytes: &'a [u8]) -> IPv4Packet {
+fn parse_ipv4<'a>(bytes: &'a [u8]) -> IPv4Packet<'a> {
     let mut ip_packet = IPv4Packet::new();
 
     let mut cursor = bytes;
@@ -355,9 +382,134 @@ fn parse_IPv4<'a>(bytes: &'a [u8]) -> IPv4Packet {
     // next 4 bytes destination address
     if let Some((byte, rest)) = cursor.split_at_checked(4) {
         ip_packet.destination_address = IPv4Addr::from_bytes(byte.try_into().unwrap());
+        cursor = rest;
+    }
+
+    // temporary skip options fileld an padding
+    let skip_offset = ip_packet.header_length * 4 - 20;
+    if let Some((_, payload)) = cursor.split_at_checked(skip_offset as usize) {
+        ip_packet.payload = Some(payload);
+    } else {
+        ip_packet.payload = None;
     }
 
     ip_packet
+}
+
+#[derive(Debug)]
+struct TcpPacket<'a> {
+    source_port: u16,
+    destination_port: u16,
+    sequence_number: u32,
+    ack_number: u32,
+    data_offset: u8,
+    reserved: u8,
+    URG: bool,
+    ACK: bool,
+    PSH: bool,
+    RST: bool,
+    SYN: bool,
+    FIN: bool,
+    window: u16,
+    checksum: u16,
+    urgent_pointer: u16,
+    payload: Option<&'a [u8]>,
+}
+
+impl TcpPacket<'_> {
+    fn new() -> Self {
+        Self {
+            source_port: 0,
+            destination_port: 0,
+            sequence_number: 0,
+            ack_number: 0,
+            data_offset: 0,
+            reserved: 0,
+            URG: false,
+            ACK: false,
+            PSH: false,
+            RST: false,
+            SYN: false,
+            FIN: false,
+            window: 0,
+            checksum: 0,
+            urgent_pointer: 0,
+            payload: None,
+        }
+    }
+}
+
+fn parse_tcp<'a>(bytes: &'a [u8]) -> TcpPacket<'a> {
+    let mut tcp_packet = TcpPacket::new();
+
+    let mut cursor = bytes;
+
+    // first 2 bytes is source_port
+    if let Some((byte, rest)) = cursor.split_at_checked(2) {
+        tcp_packet.source_port = u16::from_be_bytes(byte.try_into().unwrap());
+        cursor = rest;
+    }
+
+    // next 2 bytes is destination_port
+    if let Some((byte, rest)) = cursor.split_at_checked(2) {
+        tcp_packet.destination_port = u16::from_be_bytes(byte.try_into().unwrap());
+        cursor = rest;
+    }
+
+    // next 4 bytes is sequence_number
+    if let Some((byte, rest)) = cursor.split_at_checked(4) {
+        tcp_packet.sequence_number = u32::from_be_bytes(byte.try_into().unwrap());
+        cursor = rest;
+    }
+
+    // next 4 bytes is ack_number
+    if let Some((byte, rest)) = cursor.split_at_checked(4) {
+        tcp_packet.ack_number = u32::from_be_bytes(byte.try_into().unwrap());
+        cursor = rest;
+    }
+
+    // next 2 bytes = data_offset (4 bit) + reserved (6 bit) + URG (1 bit) + ACK (1 bit) + PSH (1 bit) + RST (1 bit)  + SYN (1 bit) + FIN (1 bit)
+    if let Some((byte, rest)) = cursor.split_at_checked(2) {
+        let value = u16::from_be_bytes(byte.try_into().unwrap());
+        tcp_packet.data_offset = (value >> 12) as u8;
+        tcp_packet.reserved = ((value >> 6) & 0x3F) as u8;
+
+        let flags = (value & 0x3F) as u8;
+
+        tcp_packet.URG = flags & 0b0010000 != 0;
+        tcp_packet.ACK = flags & 0b0001000 != 0;
+        tcp_packet.PSH = flags & 0b0001000 != 0;
+        tcp_packet.RST = flags & 0b0000100 != 0;
+        tcp_packet.SYN = flags & 0b0000010 != 0;
+        tcp_packet.FIN = flags & 0b0000001 != 0;
+        cursor = rest;
+    }
+
+    // next 2 bytes is window
+    if let Some((byte, rest)) = cursor.split_at_checked(2) {
+        tcp_packet.window = u16::from_be_bytes(byte.try_into().unwrap());
+        cursor = rest;
+    }
+
+    // next 2 bytes is checksum
+    if let Some((byte, rest)) = cursor.split_at_checked(2) {
+        tcp_packet.checksum = u16::from_be_bytes(byte.try_into().unwrap());
+        cursor = rest;
+    }
+
+    // next 2 bytes is urgent_pointer
+    if let Some((byte, rest)) = cursor.split_at_checked(2) {
+        tcp_packet.urgent_pointer = u16::from_be_bytes(byte.try_into().unwrap());
+        cursor = rest;
+    }
+
+    // temporary skip options + padding
+    let skip_offset = tcp_packet.data_offset * 4 - 20;
+    if let Some((_, payload)) = cursor.split_at_checked(skip_offset as usize) {
+        tcp_packet.payload = Some(payload);
+    }
+
+    tcp_packet
 }
 
 #[derive(Debug)]
