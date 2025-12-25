@@ -1,14 +1,19 @@
-use std::{
-    ffi::CString,
-    fmt::{self},
-    mem,
-    os::fd::RawFd,
-};
+#![allow(non_snake_case)]
+use std::{ffi::CString, mem, os::fd::RawFd};
 
 use anyhow::Result;
 use clap::Parser;
 use libc::{BIOCGBLEN, BIOCIMMEDIATE, BIOCSETIF, O_RDONLY, bpf_hdr, ifreq, ioctl, open, read};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
+
+mod eth;
+mod ipv4;
+mod shared;
+mod tcp;
+
+use eth::{EthernetFrame, FrameType};
+use ipv4::{IPv4Packet, InternetProtocol};
+use tcp::TcpPacket;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -89,65 +94,47 @@ fn main() {
             let hdr = unsafe { &*hdr_ptr };
 
             let packet_data_prt = unsafe { buffer.as_ptr().add(offset + hdr.bh_hdrlen as usize) };
-            let _packer_data =
+            let _packet_data =
                 unsafe { std::slice::from_raw_parts(packet_data_prt, hdr.bh_caplen as usize) };
 
             // println!("Captured packet: {} bytes", hdr.bh_caplen);
 
-            let frame = parse_frame(_packer_data);
-            println!();
-            println!("Ethernet Frame");
-            println!("\tDestination: {}", frame.mac_dest);
-            println!("\tSoruce: {}", frame.mac_source);
-            println!("\tType: {:?} (0x{:04X}", frame.frame_type, frame.type_raw);
+            match EthernetFrame::try_parse(_packet_data) {
+                Ok(eth_frame) => {
+                    println!();
+                    eth_frame.format_output();
 
-            match frame.frame_type {
-                FrameType::IPv4 => {
-                    let ip_packet = parse_ipv4(frame.payload);
-                    println!("Internet Protocol Version 4");
-                    println!("\tVersion: {}", ip_packet.version);
-                    println!("\tHeader length: {}", ip_packet.header_length);
-                    println!("\tTotal length: {}", ip_packet.total_length);
-                    println!("\tIdentification: 0x{:04x}", ip_packet.identification);
-                    println!("\tFlags: {}", ip_packet.flags);
-                    println!("\tFragment offset: {}", ip_packet.fragment_offset);
-                    println!("\tTTL: {}", ip_packet.ttl);
-                    println!(
-                        "\tProtocol: {:?} ({})",
-                        ip_packet.protocol, ip_packet.raw_protocol
-                    );
-                    println!("\tHeader checkshum: 0x{:04x}", ip_packet.header_checksum);
-                    println!("\tSoruce: {}", ip_packet.source_address);
-                    println!("\tDestination: {}", ip_packet.destination_address);
-
-                    if let Some(payload) = ip_packet.payload {
-                        match ip_packet.protocol {
-                            InternetProtocol::TCP => {
-                                let tcp_packet = parse_tcp(payload);
-                                println!("Transmission Control Protocol");
-                                println!("\tSource port: {}", tcp_packet.source_port);
-                                println!("\tDestination port: {}", tcp_packet.destination_port);
-                                println!("\tSequence number: {}", tcp_packet.sequence_number);
-                                println!("\tAcknowledgment number: {}", tcp_packet.ack_number);
-                                println!("\tHeader length: {}", tcp_packet.data_offset * 4);
-                                println!("\tFlags:");
-                                println!("\t\tUrgent: {}", tcp_packet.URG);
-                                println!("\t\tAcknowledgment: {}", tcp_packet.ACK);
-                                println!("\t\tPush: {}", tcp_packet.PSH);
-                                println!("\t\tReset: {}", tcp_packet.RST);
-                                println!("\t\tSyn: {}", tcp_packet.SYN);
-                                println!("\t\tFin: {}", tcp_packet.FIN);
-                                println!("\tWindow size value: {}", tcp_packet.window);
-                                println!("\tChecksum: 0x{:04x}", tcp_packet.checksum);
+                    match eth_frame.frame_type {
+                        FrameType::IPv4 => match IPv4Packet::try_parse(eth_frame.payload) {
+                            Ok(ip_packet) => {
+                                ip_packet.format_output();
+                                match ip_packet.protocol {
+                                    InternetProtocol::TCP => {
+                                        match TcpPacket::try_parse(ip_packet.payload) {
+                                            Ok(tcp_packet) => {
+                                                tcp_packet.format_output();
+                                            }
+                                            Err(e) => {
+                                                eprintln!("Broken tcp packet: {:?}", e);
+                                            }
+                                        }
+                                    }
+                                    _ => println!("Not implemented yet"),
+                                }
                             }
-                            _ => println!("Not implemented yet"),
-                        }
+                            Err(e) => {
+                                eprintln!("Broken IPv4 packet: {:?}", e);
+                            }
+                        },
+                        _ => println!("Not implemented yet"),
                     }
-                }
-                _ => println!("Unknown payload"),
-            }
 
-            println!();
+                    println!();
+                }
+                Err(e) => {
+                    eprintln!("Broken ethernet frame: {:?}", e);
+                }
+            }
 
             let allign = mem::size_of::<usize>() - 1;
             offset += (hdr.bh_hdrlen as usize + hdr.bh_caplen as usize + allign) & !allign;
@@ -170,369 +157,4 @@ fn get_network_interfaces() -> Result<Vec<String>> {
     }
 
     Ok(initerfaces_names)
-}
-
-#[derive(Debug)]
-struct EthernetFrame<'a> {
-    mac_dest: MacAddress,
-    mac_source: MacAddress,
-    frame_type: FrameType,
-    type_raw: u16,
-    payload: &'a [u8],
-}
-
-#[derive(Debug)]
-struct MacAddress {
-    address: [u8; 6],
-}
-
-impl MacAddress {
-    fn from_bytes(bytes: [u8; 6]) -> Self {
-        Self { address: bytes }
-    }
-}
-
-impl fmt::Display for MacAddress {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:x}:{:x}:{:x}:{:x}:{:x}:{:x}",
-            self.address[0],
-            self.address[1],
-            self.address[2],
-            self.address[3],
-            self.address[4],
-            self.address[5]
-        )
-    }
-}
-
-fn parse_frame<'a>(bytes: &'a [u8]) -> EthernetFrame<'a> {
-    let mac_dest: [u8; 6] = bytes[..6].try_into().unwrap();
-    let mac_source: [u8; 6] = bytes[6..12].try_into().unwrap();
-
-    let protocol_bytes = u16::from_be_bytes(bytes[12..14].try_into().unwrap());
-    let protocol_type = FrameType::try_from(protocol_bytes).unwrap();
-    EthernetFrame {
-        mac_dest: MacAddress::from_bytes(mac_dest),
-        mac_source: MacAddress::from_bytes(mac_source),
-        frame_type: protocol_type,
-        type_raw: protocol_bytes,
-        payload: &bytes[14..],
-    }
-}
-
-#[derive(Debug)]
-struct IPv4Packet<'a> {
-    version: u8,
-    header_length: u8,
-    type_of_service: u8,
-    total_length: u16,
-    identification: u16,
-    flags: u8,
-    fragment_offset: u16,
-    ttl: u8,
-    protocol: InternetProtocol,
-    raw_protocol: u8,
-    header_checksum: u16,
-    source_address: IPv4Addr,
-    destination_address: IPv4Addr,
-    payload: Option<&'a [u8]>,
-}
-
-impl IPv4Packet<'_> {
-    fn new() -> Self {
-        Self {
-            version: 0,
-            header_length: 0,
-            type_of_service: 0,
-            total_length: 0,
-            identification: 0,
-            flags: 0,
-            fragment_offset: 0,
-            ttl: 0,
-            protocol: InternetProtocol::Unknown,
-            raw_protocol: 0,
-            header_checksum: 0,
-            source_address: IPv4Addr::empty(),
-            destination_address: IPv4Addr::empty(),
-            payload: None,
-        }
-    }
-}
-
-#[derive(Debug)]
-enum InternetProtocol {
-    Reserved = 0,
-    ICMP = 1,
-    IGMP = 2,
-    GGP = 3,
-    IPinIP = 4,
-    TCP = 6,
-    UDP = 17,
-    Unknown,
-}
-
-#[derive(Debug)]
-struct IPv4Addr {
-    address: [u8; 4],
-}
-
-impl IPv4Addr {
-    fn from_bytes(bytes: [u8; 4]) -> Self {
-        Self { address: bytes }
-    }
-
-    fn empty() -> Self {
-        Self {
-            address: [0, 0, 0, 0],
-        }
-    }
-}
-
-impl fmt::Display for IPv4Addr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}.{}.{}.{}",
-            self.address[0], self.address[1], self.address[2], self.address[3]
-        )
-    }
-}
-
-impl TryFrom<u8> for InternetProtocol {
-    type Error = ();
-
-    fn try_from(value: u8) -> std::result::Result<Self, Self::Error> {
-        match value {
-            1 => Ok(InternetProtocol::ICMP),
-            2 => Ok(InternetProtocol::IGMP),
-            3 => Ok(InternetProtocol::GGP),
-            4 => Ok(InternetProtocol::IPinIP),
-            6 => Ok(InternetProtocol::TCP),
-            17 => Ok(InternetProtocol::UDP),
-            _ => Ok(InternetProtocol::Unknown),
-        }
-    }
-}
-
-fn parse_ipv4<'a>(bytes: &'a [u8]) -> IPv4Packet<'a> {
-    let mut ip_packet = IPv4Packet::new();
-
-    let mut cursor = bytes;
-
-    // 4 + 4 bits : version + hdr_length
-    if let Some((first, rest)) = cursor.split_first() {
-        ip_packet.version = u8::from_be(*first >> 4);
-        ip_packet.header_length = u8::from_be(*first & 0x0F);
-        cursor = rest;
-    }
-
-    // next byte type of service
-    if let Some((byte, rest)) = cursor.split_first() {
-        ip_packet.type_of_service = u8::from_be(*byte);
-        cursor = rest;
-    }
-
-    // next 2 bytes total length
-    if let Some((byte, rest)) = cursor.split_at_checked(2) {
-        ip_packet.total_length = u16::from_be_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // next 2 bytes identification
-    if let Some((byte, rest)) = cursor.split_at_checked(2) {
-        ip_packet.identification = u16::from_be_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // next 2 bytes = 3 bit flags + 13 bit fragment offset
-    if let Some((byte, rest)) = cursor.split_at_checked(2) {
-        ip_packet.flags = u8::from_be(byte[1] >> 5);
-        let full_value = u16::from_be_bytes(byte.try_into().unwrap());
-        ip_packet.fragment_offset = full_value & 0x1FFF;
-        cursor = rest;
-    }
-
-    // next byte ttl
-    if let Some((byte, rest)) = cursor.split_first() {
-        ip_packet.ttl = u8::from_be(*byte);
-        cursor = rest;
-    }
-
-    // next byte protocol
-    if let Some((byte, rest)) = cursor.split_first() {
-        ip_packet.protocol = InternetProtocol::try_from(*byte).unwrap();
-        ip_packet.raw_protocol = u8::from_be(*byte);
-        cursor = rest;
-    }
-
-    // next 2 bytes header_checksum
-    if let Some((byte, rest)) = cursor.split_at_checked(2) {
-        ip_packet.header_checksum = u16::from_be_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // next 4 bytes source address
-    if let Some((byte, rest)) = cursor.split_at_checked(4) {
-        ip_packet.source_address = IPv4Addr::from_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // next 4 bytes destination address
-    if let Some((byte, rest)) = cursor.split_at_checked(4) {
-        ip_packet.destination_address = IPv4Addr::from_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // temporary skip options fileld an padding
-    let skip_offset = ip_packet.header_length * 4 - 20;
-    if let Some((_, payload)) = cursor.split_at_checked(skip_offset as usize) {
-        ip_packet.payload = Some(payload);
-    } else {
-        ip_packet.payload = None;
-    }
-
-    ip_packet
-}
-
-#[derive(Debug)]
-struct TcpPacket<'a> {
-    source_port: u16,
-    destination_port: u16,
-    sequence_number: u32,
-    ack_number: u32,
-    data_offset: u8,
-    reserved: u8,
-    URG: bool,
-    ACK: bool,
-    PSH: bool,
-    RST: bool,
-    SYN: bool,
-    FIN: bool,
-    window: u16,
-    checksum: u16,
-    urgent_pointer: u16,
-    payload: Option<&'a [u8]>,
-}
-
-impl TcpPacket<'_> {
-    fn new() -> Self {
-        Self {
-            source_port: 0,
-            destination_port: 0,
-            sequence_number: 0,
-            ack_number: 0,
-            data_offset: 0,
-            reserved: 0,
-            URG: false,
-            ACK: false,
-            PSH: false,
-            RST: false,
-            SYN: false,
-            FIN: false,
-            window: 0,
-            checksum: 0,
-            urgent_pointer: 0,
-            payload: None,
-        }
-    }
-}
-
-fn parse_tcp<'a>(bytes: &'a [u8]) -> TcpPacket<'a> {
-    let mut tcp_packet = TcpPacket::new();
-
-    let mut cursor = bytes;
-
-    // first 2 bytes is source_port
-    if let Some((byte, rest)) = cursor.split_at_checked(2) {
-        tcp_packet.source_port = u16::from_be_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // next 2 bytes is destination_port
-    if let Some((byte, rest)) = cursor.split_at_checked(2) {
-        tcp_packet.destination_port = u16::from_be_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // next 4 bytes is sequence_number
-    if let Some((byte, rest)) = cursor.split_at_checked(4) {
-        tcp_packet.sequence_number = u32::from_be_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // next 4 bytes is ack_number
-    if let Some((byte, rest)) = cursor.split_at_checked(4) {
-        tcp_packet.ack_number = u32::from_be_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // next 2 bytes = data_offset (4 bit) + reserved (6 bit) + URG (1 bit) + ACK (1 bit) + PSH (1 bit) + RST (1 bit)  + SYN (1 bit) + FIN (1 bit)
-    if let Some((byte, rest)) = cursor.split_at_checked(2) {
-        let value = u16::from_be_bytes(byte.try_into().unwrap());
-        tcp_packet.data_offset = (value >> 12) as u8;
-        tcp_packet.reserved = ((value >> 6) & 0x3F) as u8;
-
-        let flags = (value & 0x3F) as u8;
-
-        tcp_packet.URG = flags & 0b0010000 != 0;
-        tcp_packet.ACK = flags & 0b0001000 != 0;
-        tcp_packet.PSH = flags & 0b0001000 != 0;
-        tcp_packet.RST = flags & 0b0000100 != 0;
-        tcp_packet.SYN = flags & 0b0000010 != 0;
-        tcp_packet.FIN = flags & 0b0000001 != 0;
-        cursor = rest;
-    }
-
-    // next 2 bytes is window
-    if let Some((byte, rest)) = cursor.split_at_checked(2) {
-        tcp_packet.window = u16::from_be_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // next 2 bytes is checksum
-    if let Some((byte, rest)) = cursor.split_at_checked(2) {
-        tcp_packet.checksum = u16::from_be_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // next 2 bytes is urgent_pointer
-    if let Some((byte, rest)) = cursor.split_at_checked(2) {
-        tcp_packet.urgent_pointer = u16::from_be_bytes(byte.try_into().unwrap());
-        cursor = rest;
-    }
-
-    // temporary skip options + padding
-    let skip_offset = tcp_packet.data_offset * 4 - 20;
-    if let Some((_, payload)) = cursor.split_at_checked(skip_offset as usize) {
-        tcp_packet.payload = Some(payload);
-    }
-
-    tcp_packet
-}
-
-#[derive(Debug)]
-enum FrameType {
-    IPv4,
-    IPv6,
-    ARP,
-    FARP,
-    PPP,
-    Unknown,
-}
-
-impl TryFrom<u16> for FrameType {
-    type Error = ();
-
-    fn try_from(value: u16) -> std::result::Result<Self, Self::Error> {
-        match value {
-            0x0800 => Ok(FrameType::IPv4),
-            0x0806 => Ok(FrameType::ARP),
-            0x0808 => Ok(FrameType::FARP),
-            0x86DD => Ok(FrameType::IPv6),
-            0x880B => Ok(FrameType::PPP),
-            _ => Ok(FrameType::Unknown),
-        }
-    }
 }
