@@ -1,5 +1,5 @@
 #![allow(non_snake_case)]
-use std::{ffi::CString, mem, os::fd::RawFd};
+use std::{f32::consts::E, ffi::CString, mem, os::fd::RawFd};
 
 use anyhow::Result;
 use clap::Parser;
@@ -10,10 +10,13 @@ mod eth;
 mod ipv4;
 mod shared;
 mod tcp;
+mod udp;
 
 use eth::{EthernetFrame, FrameType};
 use ipv4::{IPv4Packet, InternetProtocol};
 use tcp::TcpPacket;
+
+use crate::udp::UdpPacket;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -116,6 +119,16 @@ fn main() {
                                             }
                                             Err(e) => {
                                                 eprintln!("Broken tcp packet: {:?}", e);
+                                            }
+                                        }
+                                    }
+                                    InternetProtocol::UDP => {
+                                        match UdpPacket::try_parse(ip_packet.payload) {
+                                            Ok(udp_packet) => {
+                                                udp_packet.format_output();
+                                            }
+                                            Err(e) => {
+                                                eprintln!("Broken udp packet: {:?}", e);
                                             }
                                         }
                                     }
