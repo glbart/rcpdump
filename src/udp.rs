@@ -2,11 +2,11 @@ use crate::shared::ParseError;
 use crate::shared::take_next_bytes;
 
 pub struct UdpPacket<'a> {
-    source_port: u16,
-    destination_port: u16,
+    pub source_port: u16,
+    pub destination_port: u16,
     length: u16,
     checksum: u16,
-    payload: &'a [u8],
+    pub payload: &'a [u8],
 }
 
 impl UdpPacket<'_> {

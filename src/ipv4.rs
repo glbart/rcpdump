@@ -31,12 +31,12 @@ pub enum InternetProtocol {
 }
 
 #[derive(Debug)]
-struct IPv4Addr {
+pub struct IPv4Addr {
     address: [u8; 4],
 }
 
 impl IPv4Addr {
-    fn from_bytes(bytes: [u8; 4]) -> Self {
+    pub fn from_bytes(bytes: [u8; 4]) -> Self {
         Self { address: bytes }
     }
 }
