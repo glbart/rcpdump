@@ -3,7 +3,9 @@ use std::{ffi::CString, mem, os::fd::RawFd};
 
 use anyhow::Result;
 use clap::Parser;
-use libc::{BIOCGBLEN, BIOCIMMEDIATE, BIOCSETIF, O_RDONLY, bpf_hdr, ifreq, ioctl, open, read};
+use libc::{
+    BIOCGBLEN, BIOCIMMEDIATE, BIOCSETIF, BPF_ALIGNMENT, O_RDONLY, bpf_hdr, ifreq, ioctl, open, read,
+};
 use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 
 mod dns;
@@ -181,7 +183,7 @@ fn main() {
                 }
             }
 
-            let allign = mem::size_of::<usize>() - 1;
+            let allign = BPF_ALIGNMENT as usize - 1;
             offset += (hdr.bh_hdrlen as usize + hdr.bh_caplen as usize + allign) & !allign;
         }
     }
