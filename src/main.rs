@@ -11,6 +11,7 @@ use network_interface::{NetworkInterface, NetworkInterfaceConfig};
 mod dns;
 mod eth;
 mod ipv4;
+mod ntp;
 mod shared;
 mod tcp;
 mod udp;
@@ -19,7 +20,7 @@ use eth::{EthernetFrame, FrameType};
 use ipv4::{IPv4Packet, InternetProtocol};
 use tcp::TcpPacket;
 
-use crate::{dns::DnsPacket, udp::UdpPacket};
+use crate::{dns::DnsPacket, ntp::NtpPacket, udp::UdpPacket};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -134,27 +135,36 @@ fn main() {
                                                     udp_packet.source_port,
                                                     udp_packet.destination_port,
                                                 ) {
-                                                    (_, 53) => match DnsPacket::try_parse(
-                                                        udp_packet.payload,
-                                                    ) {
-                                                        Ok(dns_packet) => {
-                                                            dns_packet.format_output();
+                                                    (_, 53) | (53, _) => {
+                                                        match DnsPacket::try_parse(
+                                                            udp_packet.payload,
+                                                        ) {
+                                                            Ok(dns_packet) => {
+                                                                dns_packet.format_output();
+                                                            }
+                                                            Err(e) => {
+                                                                eprintln!(
+                                                                    "Broken dns packet: {:?}",
+                                                                    e
+                                                                );
+                                                            }
                                                         }
-                                                        Err(e) => {
-                                                            eprintln!("Broken dns packet: {:?}", e);
+                                                    }
+                                                    (_, 123) | (123, _) => {
+                                                        match NtpPacket::try_parse(
+                                                            udp_packet.payload,
+                                                        ) {
+                                                            Ok(ntp_packet) => {
+                                                                ntp_packet.format_output();
+                                                            }
+                                                            Err(e) => {
+                                                                eprintln!(
+                                                                    "Broken ntp packet: {:?}",
+                                                                    e
+                                                                );
+                                                            }
                                                         }
-                                                    },
-                                                    (53, _) => match DnsPacket::try_parse(
-                                                        udp_packet.payload,
-                                                    ) {
-                                                        Ok(dns_packet) => {
-                                                            dns_packet.format_output();
-                                                            // return;
-                                                        }
-                                                        Err(e) => {
-                                                            eprintln!("Broken dns packet: {:?}", e);
-                                                        }
-                                                    },
+                                                    }
                                                     _ => println!("unimplemented"),
                                                 }
                                                 match udp_packet.destination_port {
